@@ -1,3 +1,4 @@
+# KoalaTech user service - Week 08 continuous delivery update.
 import logging
 import os
 import time
