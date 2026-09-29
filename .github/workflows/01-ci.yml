@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-  
+
   # Manual trigger for the workflow
   workflow_dispatch:
 
@@ -103,17 +103,18 @@ jobs:
 
 
   # =========================================================
-  # Build and Push Docker Images
+  # Build, Scan and Push Docker Images
   # =========================================================
   build-and-push:
-    name: Build and Push ${{ matrix.image }}
+    name: Build, Scan and Push ${{ matrix.image }}
     runs-on: ubuntu-latest
 
     # All backend tests must pass before this job starts
     needs:
       - backend-test
 
-    # Build and push when code is pushed to main or manually triggered
+    # Build, scan and push when code is pushed to main
+    # or when the workflow is manually triggered
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
 
     strategy:
@@ -159,6 +160,16 @@ jobs:
             --platform linux/amd64 \
             -t ${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }} \
             ./${{ matrix.service }}
+
+      # Scan the locally built image before it is pushed to ACR.
+      # Critical and high severity findings are reported in the
+      # GitHub Actions log for review.
+      - name: Scan Docker image with Docker Scout
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: local://${{ vars.ACR_LOGIN_SERVER }}/${{ matrix.image }}:${{ github.sha }}
+          only-severities: critical,high
 
       - name: Push Docker image with commit SHA
         run: |
