@@ -1,0 +1,20 @@
+# Monitoring configuration for the KoalaTech AKS environment.
+# Used with prometheus-community/kube-prometheus-stack.
+
+grafana:
+  enabled: true
+
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+
+prometheus:
+  enabled: true
+
+kubeStateMetrics:
+  enabled: true
+
+nodeExporter:
+  enabled: true
