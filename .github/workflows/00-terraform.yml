@@ -3,6 +3,13 @@ name: 00 - Terraform Infrastructure
 on:
   workflow_dispatch:
 
+  push:
+    branches:
+      - task-10.2d-infrastructure-security-monitoring
+    paths:
+      - "terraform/**"
+      - ".github/workflows/00-terraform.yml"
+
 jobs:
   terraform:
     name: Terraform Provision Infrastructure
