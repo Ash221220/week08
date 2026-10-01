@@ -2,13 +2,6 @@ name: 05 - Deploy Monitoring
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-      - task-10.2d-infrastructure-security-monitoring
-    paths:
-      - "monitoring/**"
-      - ".github/workflows/05-monitoring.yml"
 
 jobs:
   deploy-monitoring:
