@@ -56,9 +56,7 @@ variable "aks_node_count" {
 }
 
 variable "aks_node_vm_size" {
-  description = "Virtual machine size used by the AKS nodes"
-  type        = string
-  default     = "Standard_D2s_v3"
+  default = "Standard_D2s_v5"
 }
 
 variable "environment" {

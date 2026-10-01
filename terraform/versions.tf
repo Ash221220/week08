@@ -3,7 +3,7 @@ terraform {
 
   backend "azurerm" {
     resource_group_name  = "koalatech-week08-rg"
-    storage_account_name = "avinashsit722w08stg1609"
+    storage_account_name = "avinashsit722w08stg0210"
     container_name       = "tfstate"
     key                  = "koalatech-week08.tfstate"
     use_azuread_auth     = true

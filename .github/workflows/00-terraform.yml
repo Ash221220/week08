@@ -3,13 +3,6 @@ name: 00 - Terraform Infrastructure
 on:
   workflow_dispatch:
 
-  push:
-    branches:
-      - task-10.2d-infrastructure-security-monitoring
-    paths:
-      - "terraform/**"
-      - ".github/workflows/00-terraform.yml"
-
 jobs:
   terraform:
     name: Terraform Provision Infrastructure
@@ -17,13 +10,13 @@ jobs:
 
     env:
       TF_VAR_resource_group_name: koalatech-week08-rg
-      TF_VAR_acr_name: avinashsit722w08acr1609
-      TF_VAR_storage_account_name: avinashsit722w08stg1609
+      TF_VAR_acr_name: avinashsit722w08acr0210
+      TF_VAR_storage_account_name: avinashsit722w08stg0210
       TF_VAR_aks_cluster_name: avinash-sit722-week08-aks
       TF_VAR_aks_dns_prefix: koalatech-w08
       TF_VAR_environment: development
       TF_VAR_aks_node_count: 2
-      TF_VAR_aks_node_vm_size: Standard_D2s_v3
+      TF_VAR_aks_node_vm_size: Standard_D2s_v5
 
     steps:
       - name: Checkout repository
@@ -74,10 +67,10 @@ jobs:
         run: az group show --name koalatech-week08-rg --output table
 
       - name: Verify ACR
-        run: az acr show --name avinashsit722w08acr1609 --resource-group koalatech-week08-rg --output table
+        run: az acr show --name avinashsit722w08acr0210 --resource-group koalatech-week08-rg --output table
 
       - name: Verify AKS
         run: az aks show --name avinash-sit722-week08-aks --resource-group koalatech-week08-rg --output table
 
       - name: Verify Storage Account
-        run: az storage account show --name avinashsit722w08stg1609 --resource-group koalatech-week08-rg --output table
+        run: az storage account show --name avinashsit722w08stg0210 --resource-group koalatech-week08-rg --output table
