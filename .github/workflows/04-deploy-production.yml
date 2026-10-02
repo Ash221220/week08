@@ -14,7 +14,6 @@ jobs:
     name: Deploy to Production
     runs-on: ubuntu-latest
 
-    # Production deployment only runs if the staging test succeeds
     if: >
       ${{ github.event.workflow_run.conclusion == 'success' }}
 
@@ -22,6 +21,10 @@ jobs:
       name: production
 
     steps:
+      # ---------------------------------------------------------
+      # Checkout and Azure / AKS setup
+      # ---------------------------------------------------------
+
       - name: Checkout tested commit
         uses: actions/checkout@v4
         with:
@@ -38,6 +41,10 @@ jobs:
             --resource-group ${{ vars.AKS_RESOURCE_GROUP }} \
             --name ${{ vars.AKS_CLUSTER_NAME }} \
             --overwrite-existing
+
+      # ---------------------------------------------------------
+      # Production namespace and secrets
+      # ---------------------------------------------------------
 
       - name: Create production namespace
         run: |
@@ -68,16 +75,263 @@ jobs:
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
-      - name: Apply Kubernetes manifests
-        run: |
-          kubectl apply \
-            -f kubernetes/production/
+      # ---------------------------------------------------------
+      # Existing production infrastructure
+      # ---------------------------------------------------------
 
-      - name: Update frontend image
+      - name: Apply Kubernetes manifests
+        shell: bash
         run: |
-          kubectl set image deployment/frontend \
-            frontend=${{ vars.ACR_LOGIN_SERVER }}/koalatech-frontend:${{ github.event.workflow_run.head_sha }} \
-            -n production
+          echo "Applying production infrastructure manifests."
+
+          # Namespace and database manifests contain their final images/configuration
+          # and can be applied directly.
+          for manifest in kubernetes/production/0[1-6]-*.yaml; do
+            echo "Applying $manifest"
+            kubectl apply -f "$manifest"
+          done
+
+          # Render backend deployment manifests with the tested commit image
+          # before applying them. This prevents placeholder images from ever
+          # being deployed while still allowing a fresh environment to be created.
+          SHA="${{ github.event.workflow_run.head_sha }}"
+          ACR="${{ vars.ACR_LOGIN_SERVER }}"
+
+          sed "s|image: placeholder|image: $ACR/koalatech-user-service:$SHA|" \
+            kubernetes/production/07-user-service.yaml | kubectl apply -f -
+
+          sed "s|image: placeholder|image: $ACR/koalatech-student-service:$SHA|" \
+            kubernetes/production/08-student-service.yaml | kubectl apply -f -
+
+          sed "s|image: placeholder|image: $ACR/koalatech-lecturer-service:$SHA|" \
+            kubernetes/production/09-lecturer-service.yaml | kubectl apply -f -
+
+          sed "s|image: placeholder|image: $ACR/koalatech-course-service:$SHA|" \
+            kubernetes/production/10-course-service.yaml | kubectl apply -f -
+
+          sed "s|image: placeholder|image: $ACR/koalatech-enrollment-service:$SHA|" \
+            kubernetes/production/11-enrollment-service.yaml | kubectl apply -f -
+
+          # Do not reapply the public frontend Service on every deployment.
+          # Its slot selector represents the currently active production version.
+          if ! kubectl get service frontend -n production >/dev/null 2>&1; then
+            echo "Frontend service does not exist. Creating initial Blue service."
+            kubectl apply -f kubernetes/production/12-frontend.yaml
+          else
+            echo "Frontend service already exists."
+            echo "Preserving its current Blue/Green selector."
+          fi
+
+      # =========================================================
+      # TASK 10.3HD - AUTOMATED BLUE/GREEN FRONTEND DEPLOYMENT
+      # =========================================================
+
+      # Determine which slot currently receives production traffic.
+      # The opposite slot becomes the candidate for this release.
+      - name: Determine active and candidate slots
+        id: slots
+        shell: bash
+        run: |
+          ACTIVE_SLOT=$(kubectl get service frontend \
+            -n production \
+            -o jsonpath='{.spec.selector.slot}')
+
+          if [ "$ACTIVE_SLOT" = "blue" ]; then
+            CANDIDATE_SLOT="green"
+          elif [ "$ACTIVE_SLOT" = "green" ]; then
+            CANDIDATE_SLOT="blue"
+          else
+            echo "Unable to determine active Blue/Green slot."
+            exit 1
+          fi
+
+          echo "Active slot: $ACTIVE_SLOT"
+          echo "Candidate slot: $CANDIDATE_SLOT"
+
+          echo "active_slot=$ACTIVE_SLOT" >> "$GITHUB_OUTPUT"
+          echo "candidate_slot=$CANDIDATE_SLOT" >> "$GITHUB_OUTPUT"
+
+      # Deploy the new image into the inactive slot.
+      # Production traffic continues to use the current active slot.
+      - name: Deploy candidate frontend
+        shell: bash
+        run: |
+          CANDIDATE="${{ steps.slots.outputs.candidate_slot }}"
+          IMAGE="${{ vars.ACR_LOGIN_SERVER }}/koalatech-frontend:${{ github.event.workflow_run.head_sha }}"
+
+          echo "Deploying candidate to frontend-$CANDIDATE"
+          echo "Candidate image: $IMAGE"
+
+          sed \
+            "s|image: placeholder|image: $IMAGE|" \
+            kubernetes/production/blue-green/frontend-$CANDIDATE.yaml \
+            | kubectl apply -f -
+
+      - name: Wait for candidate rollout
+        shell: bash
+        run: |
+          CANDIDATE="${{ steps.slots.outputs.candidate_slot }}"
+
+          kubectl rollout status \
+            deployment/frontend-$CANDIDATE \
+            -n production \
+            --timeout=300s
+
+      # The candidate service allows the new deployment to be tested
+      # without changing the public production service.
+      - name: Configure candidate service
+        shell: bash
+        run: |
+          CANDIDATE="${{ steps.slots.outputs.candidate_slot }}"
+
+          kubectl apply \
+            -f kubernetes/production/blue-green/frontend-candidate-service.yaml
+
+          kubectl patch service frontend-candidate \
+            -n production \
+            --type merge \
+            -p "{\"spec\":{\"selector\":{\"app\":\"frontend\",\"slot\":\"$CANDIDATE\"}}}"
+
+          echo "Candidate service selector:"
+
+          kubectl get service frontend-candidate \
+            -n production \
+            -o jsonpath='{.spec.selector}'
+
+          echo
+
+      # ---------------------------------------------------------
+      # PRE-PROMOTION QUALITY GATE
+      # ---------------------------------------------------------
+
+      - name: Smoke test candidate
+        shell: bash
+        run: |
+          echo "Running candidate quality gate"
+
+          kubectl delete pod bluegreen-smoke-test \
+            -n production \
+            --ignore-not-found=true
+
+          kubectl run bluegreen-smoke-test \
+            --namespace production \
+            --image=curlimages/curl:8.12.1 \
+            --restart=Never \
+            --rm \
+            -i \
+            --command -- \
+            sh -c '
+              for i in 1 2 3 4 5; do
+                CODE=$(curl -s -o /dev/null -w "%{http_code}" http://frontend-candidate/ || true)
+
+                echo "Candidate HTTP status: $CODE"
+
+                if [ "$CODE" = "200" ]; then
+                  echo "Candidate quality gate PASSED"
+                  exit 0
+                fi
+
+                echo "Candidate not ready. Retrying..."
+                sleep 5
+              done
+
+              echo "Candidate quality gate FAILED"
+              exit 1
+            '
+
+      # ---------------------------------------------------------
+      # PROMOTION
+      # ---------------------------------------------------------
+
+      - name: Promote candidate to production
+        shell: bash
+        run: |
+          CANDIDATE="${{ steps.slots.outputs.candidate_slot }}"
+
+          echo "Promoting frontend-$CANDIDATE to production"
+
+          kubectl patch service frontend \
+            -n production \
+            --type merge \
+            -p "{\"spec\":{\"selector\":{\"app\":\"frontend\",\"slot\":\"$CANDIDATE\"}}}"
+
+          echo "Production service selector:"
+
+          kubectl get service frontend \
+            -n production \
+            -o jsonpath='{.spec.selector}'
+
+          echo
+
+      # ---------------------------------------------------------
+      # POST-PROMOTION VALIDATION AND AUTOMATIC ROLLBACK
+      # ---------------------------------------------------------
+
+      - name: Validate production and rollback on failure
+        shell: bash
+        run: |
+          ACTIVE="${{ steps.slots.outputs.active_slot }}"
+          CANDIDATE="${{ steps.slots.outputs.candidate_slot }}"
+
+          echo "Previous stable environment: $ACTIVE"
+          echo "New production environment: $CANDIDATE"
+          echo "Running post-promotion validation"
+
+          SUCCESS=false
+
+          for i in 1 2 3 4 5; do
+            kubectl delete pod bluegreen-production-test \
+              -n production \
+              --ignore-not-found=true
+
+            CODE=$(kubectl run bluegreen-production-test \
+              --namespace production \
+              --image=curlimages/curl:8.12.1 \
+              --restart=Never \
+              --rm \
+              -i \
+              --command -- \
+              curl -s -o /dev/null -w "%{http_code}" http://frontend/ || true)
+
+            echo "Production test result: $CODE"
+
+            if echo "$CODE" | grep -q "200"; then
+              SUCCESS=true
+              break
+            fi
+
+            echo "Production validation failed. Retrying..."
+            sleep 5
+          done
+
+          if [ "$SUCCESS" != "true" ]; then
+            echo "POST-PROMOTION VALIDATION FAILED"
+            echo "Starting automatic rollback to frontend-$ACTIVE"
+
+            kubectl patch service frontend \
+              -n production \
+              --type merge \
+              -p "{\"spec\":{\"selector\":{\"app\":\"frontend\",\"slot\":\"$ACTIVE\"}}}"
+
+            echo "Rollback completed."
+
+            echo "Restored production selector:"
+
+            kubectl get service frontend \
+              -n production \
+              -o jsonpath='{.spec.selector}'
+
+            echo
+
+            exit 1
+          fi
+
+          echo "POST-PROMOTION VALIDATION PASSED"
+          echo "frontend-$CANDIDATE remains the production environment."
+
+      # ---------------------------------------------------------
+      # Existing backend image deployment
+      # ---------------------------------------------------------
 
       - name: Update user-service image
         run: |
@@ -109,8 +363,10 @@ jobs:
             enrollment-service=${{ vars.ACR_LOGIN_SERVER }}/koalatech-enrollment-service:${{ github.event.workflow_run.head_sha }} \
             -n production
 
-      # Wait for the databases first so backend services have their
-      # dependencies available before production validation continues.
+      # ---------------------------------------------------------
+      # Existing database validation
+      # ---------------------------------------------------------
+
       - name: Wait for production databases
         run: |
           kubectl rollout status deployment/user-db \
@@ -133,11 +389,9 @@ jobs:
             -n production \
             --timeout=300s
 
-      - name: Wait for frontend rollout
-        run: |
-          kubectl rollout status deployment/frontend \
-            -n production \
-            --timeout=300s
+      # ---------------------------------------------------------
+      # Existing backend rollout validation
+      # ---------------------------------------------------------
 
       - name: Wait for user-service rollout
         run: |
@@ -169,6 +423,10 @@ jobs:
             -n production \
             --timeout=300s
 
+      # ---------------------------------------------------------
+      # Final production validation
+      # ---------------------------------------------------------
+
       - name: Verify production pods are ready
         run: |
           kubectl wait \
@@ -178,11 +436,50 @@ jobs:
             -n production \
             --timeout=300s
 
+      - name: Show Blue Green deployment state
+        run: |
+          echo "========================================="
+          echo "Blue/Green Deployment State"
+          echo "========================================="
+
+          echo "Frontend deployments:"
+          kubectl get deployments \
+            -n production \
+            -l app=frontend
+
+          echo
+          echo "Frontend pods:"
+          kubectl get pods \
+            -n production \
+            -l app=frontend \
+            --show-labels
+
+          echo
+          echo "Production selector:"
+
+          kubectl get service frontend \
+            -n production \
+            -o jsonpath='{.spec.selector}'
+
+          echo
+          echo
+          echo "Candidate selector:"
+
+          kubectl get service frontend-candidate \
+            -n production \
+            -o jsonpath='{.spec.selector}'
+
+          echo
+
       - name: Show production resources
         run: |
           kubectl get pods -n production
           kubectl get services -n production
           kubectl get pvc -n production
+
+  # =============================================================
+  # EXISTING TASK 10.2 MONITORING
+  # =============================================================
 
   deploy-monitoring:
     name: Deploy and Validate Monitoring
