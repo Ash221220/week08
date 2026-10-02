@@ -279,30 +279,38 @@ jobs:
 
           SUCCESS=false
 
-          for i in 1 2 3 4 5; do
-            kubectl delete pod bluegreen-production-test \
-              -n production \
-              --ignore-not-found=true
+          # TASK 10.3HD controlled rollback demonstration.
+          # When FORCE_ROLLBACK_TEST=true, deliberately simulate a
+          # post-promotion failure so the automatic rollback can be demonstrated.
+          if [ "${{ vars.FORCE_ROLLBACK_TEST }}" = "true" ]; then
+            echo "CONTROLLED ROLLBACK TEST ENABLED"
+            echo "Simulating post-promotion validation failure."
+          else
+            for i in 1 2 3 4 5; do
+              kubectl delete pod bluegreen-production-test \
+                -n production \
+                --ignore-not-found=true
 
-            CODE=$(kubectl run bluegreen-production-test \
-              --namespace production \
-              --image=curlimages/curl:8.12.1 \
-              --restart=Never \
-              --rm \
-              -i \
-              --command -- \
-              curl -s -o /dev/null -w "%{http_code}" http://frontend/ || true)
+              CODE=$(kubectl run bluegreen-production-test \
+                --namespace production \
+                --image=curlimages/curl:8.12.1 \
+                --restart=Never \
+                --rm \
+                -i \
+                --command -- \
+                curl -s -o /dev/null -w "%{http_code}" http://frontend/ || true)
 
-            echo "Production test result: $CODE"
+              echo "Production test result: $CODE"
 
-            if echo "$CODE" | grep -q "200"; then
-              SUCCESS=true
-              break
-            fi
+              if echo "$CODE" | grep -q "200"; then
+                SUCCESS=true
+                break
+              fi
 
-            echo "Production validation failed. Retrying..."
-            sleep 5
-          done
+              echo "Production validation failed. Retrying..."
+              sleep 5
+            done
+          fi
 
           if [ "$SUCCESS" != "true" ]; then
             echo "POST-PROMOTION VALIDATION FAILED"
